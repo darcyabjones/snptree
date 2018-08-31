@@ -6,23 +6,28 @@ params.genes = "$baseDir/data/SN15v9_OM_ChromOnly.gff3"
 params.bed = "$baseDir/data/single_97pc_regions.bedgraph"
 
 vcfFile = file(params.vcf)
-bedFile = file(params.vcf)
+bedFile = file(params.bed)
 
 
 process applyFilters {
+    container "quay.io/biocontainers/bcftools:1.9--h4da6232_0"
+
     input:
     file vcf from vcfFile
 
     output:
-    file "${vcf.baseName}_filtered.vcf.gz" into filteredVcf
+    file "${vcf.baseName}_filtered.vcf" into filteredVcf
 
     """
-    bcftools view -f".,PASS" -O z ${vcf} > "${vcf.baseName}_filtered.vcf.gz"
+    bcftools view --types snps ${vcf} \
+    | bcftools view -f".,PASS" -O v - \
+    | uniq \
+    > "${vcf.baseName}_filtered.vcf"
     """
 }
 
 process intersectVcfBed {
-    //container "quay.io/biocontainers/bedtools:2.27.1--1"
+    container "quay.io/biocontainers/bedtools:2.27.1--1"
     publishDir "intersectBedVcf"
 
     input:
@@ -39,6 +44,7 @@ process intersectVcfBed {
 
 
 process selectInformative {
+    container "quay.io/biocontainers/snpsift:4.3.1t--1"
     publishDir "selectInformative"
 
     input:
@@ -52,90 +58,158 @@ process selectInformative {
     """
 }
 
-process coordsToBED {
-    publishDir "bed_alignments"
+
+process snpToFasta {
+    container "quay.io/biocontainers/vcfkit:0.1.6--py27h24bf2e0_2"
+    publishDir "snpToFasta"
 
     input:
-    file coord from mcoords
+    file vcf from informativeVcf
 
     output:
-    file "${coord.baseName}.bed" into coordsBEDs
+    file "${vcf.baseName}.fasta" into informativeFasta
 
     """
-    tail -n +5 ${coord} \
-    | awk '{ printf "%s\\t%s\\t%s\\t\\.\\t+\\t%s\\tfiltered\\n", \$12, \$1-1, \$2, \$7 }' \
-    | sort -k1,1 -k2,2n \
-    > ${coord.baseName}.bed
+    vk phylo fasta ${vcf} > ${vcf.baseName}.fasta
     """
 }
 
 
-process genomeIndex {
-    container "quay.io/biocontainers/samtools:1.9--h46bd0b3_0"
+process variantFasta {
+    container "quay.io/biocontainers/biopython:1.70--np112py36_1"
+    publishDir "snpToFasta"
+
     input:
-    file reference from reference_file
+    file vcf from informativeFasta
 
     output:
-    file "${reference}.fai" into referenceIndex
+    file "${vcf.baseName}_variant.fasta" into varFasta
 
     """
-    samtools faidx ${reference} > ${reference}.fai
+    #!/usr/bin/env python3
+    
+    from Bio import AlignIO
+    
+    msa = AlignIO.read("${vcf}", format="fasta")
+    
+    to_kill = []
+    for i, col in enumerate(zip(*msa)):
+        col = list(filter(lambda x: x in ('A', 'T', 'G', 'C'), col))
+        if all(col[0] == base for base in col[1:]):
+            to_kill.append(i)
+    
+    # Later we add +1 to i so use -1 to get 0.
+    to_kill.insert(0, -1)
+    to_kill.append(msa.get_alignment_length())
+    
+    # Run through the columns and construct new msa excluding killed sites.
+    sub_msas = None
+    for i, j in zip(to_kill, to_kill[1:]):
+        i = i + 1
+        if i == j:
+            continue
+        
+        if sub_msas is None:
+            sub_msas = msa[:, i:j]
+        else:
+            sub_msas += msa[:, i:j]
+    
+    AlignIO.write(sub_msas, "${vcf.baseName}_variant.fasta", format="fasta")
     """
 }
 
 
-process bedCoverage {
-    container "quay.io/biocontainers/bedtools:2.27.1--1"
-    publishDir "bedgraph_coverages"
+process tree {
+    container "quay.io/biocontainers/raxml:8.2.10--h470a237_1"
+    publishDir "tree"
 
     input:
-    file bed from coordsBEDs
-    file index from referenceIndex
+    file fasta from varFasta
 
     output:
-    file "${bed.baseName}.bedgraph" into coverageBEDs
-
+    file "RAxML_bootstrap.${fasta.baseName}" into bootstrapFile
     """
-    bedtools genomecov -bga -g ${index} -i ${bed} > ${bed.baseName}.bedgraph
+    raxmlHPC-PTHREADS \
+        -T 15 \
+        -p 12345 \
+        -b 12345 \
+        -f d \
+        -# autoMRE \
+        -m ASC_GTRCAT \
+        --asc-corr=lewis \
+        -s ${fasta} \
+        -n ${fasta.baseName}
     """
 }
 
 
-
-percentages = [1, 2, 3, 4, 5, 7, 10, 20, 30, 40, 50, 60, 70, 80, 90, 93, 95, 96, 97, 98, 99]
-
-process compareCoverage {
-    publishDir "compare_coverages"
+process consensus {
+    container "quay.io/biocontainers/raxml:8.2.10--h470a237_1"
+    publishDir "tree"
 
     input:
-    file bg from combinedCoverage
-    val perc from percentages
+    file trees from bootstrapFile
 
     output:
-    file "core_${perc}pc_regions.bedgraph" into core_regions
-    file "duplicate_${perc}pc_regions.bedgraph" into duplicate_regions
+    file "RAxML_MajorityRuleExtendedConsensusTree.consensus" into consensusTree
+
+"""
+raxmlHPC-PTHREADS \
+    -T 15 \
+    -J MRE \
+    -z ${tree} \
+    -m ASC_GTRCAT \
+    --asc-corr=lewis \
+    -n "consensus"
+"""
+
+}
+
+
+process ml {
+    container "quay.io/biocontainers/raxml:8.2.10--h470a237_1"
+    publishDir "tree"
+
+    input:
+
+    output:
+    file "RAxML_bestTree.likelihoods" into bestTreeFile
+    file "RAxML_result.likelihoods.RUN.*" into resultFile
+    file "RAxML_parsimonyTree.likelihoods.RUN.*" into parsimonyFile
+
+    # most likely tree
+    """
+    raxmlHPC-PTHREADS \
+        -T 16 \
+        -f d \
+        -m ASC_GTRCAT \
+        -asc-corr=lewis \
+        -n likelihoods \
+        -s ${fasta} \
+        -p 12345 \
+        -# 50
+    """
+}
+
+process annot {
+    container "quay.io/biocontainers/raxml:8.2.10--h470a237_1"
+    publishDir "tree"
+
+    input:
+
+    output:
+    file "RAxML_bipartitions.best_annotated" into
+    file "RAxML_bipartitionsBranchLabels.best_annotated"
 
     """
-    /usr/bin/env python3
-
-    import os
-    import pandas as pd
-
-    table = pd.read_table("${bg}")
-    table.columns = [os.path.split(os.path.splitext(c)[0])[1] for c in table.columns]
-
-    # Cheating a little bit here
-    table.drop(columns=["15FG031_contigs", "15FG039_contigs", "15FG046_contigs", "203FG217_contigs"], inplace=True) 
-    pc = ${perc} / 100
-
-    table2 = table[(table.iloc[:, 3:] > 0).mean(axis=1) > pc]
-    table2.to_csv("core_${perc}pc_regions.bedgraph", index=False, sep="\t")
-
-    table3 = table2[(table2.iloc[:, 3:] > 1).mean(axis=1) > pc]
-    table3.to_csv("duplicate_${perc}pc_regions.bedgraph", index=False, sep="\t")
-
-    table4 = table2[(table2.iloc[:, 3:] == 1).mean(axis=1) > pc]
-    table4.to_csv("single_${perc}pc_regions.bedgraph", index=False, sep="\t")
+    raxmlHPC-PTHREADS \
+        -T 15 \
+        -f b \
+        -m ASC_GTRCAT \
+        --asc-corr=lewis \
+        -z bootstrapped_trees \
+        -t best_tree \
+        -n bs_tree
     """
 }
 
