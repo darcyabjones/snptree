@@ -438,7 +438,7 @@ process findBestPartitionedModelForTree {
       -ntmax "${task.cpus}" \
       -s snps.fasta \
       -st DNA \
-      -m "MF+ASC" \
+      -m "MF+ASC+MERGE" \
       -mset "GTR,JC,F81,K80,HKY,K81" \
       -cmax "${cmax}" \
       -rcluster "${rcluster}" \
@@ -479,7 +479,6 @@ process runPartitionTreeBootstraps {
       -bb 1000 \
       -alrt 1000 \
       -bspec GENESITE \
-      -bnni \
       -wbt \
       -st DNA \
       -pre "chunk${chunk}"
@@ -564,7 +563,6 @@ process runTreeBootstraps {
       -bb 1000 \
       -alrt 1000 \
       -bo 20 \
-      -bnni \
       -wbt \
       -st DNA \
       -pre "chunk${chunk}"
