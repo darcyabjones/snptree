@@ -1,3 +1,14 @@
-data/**
-
+*.sif
+*.log*
 !**.gitinclude
+.nextflow*
+
+work
+
+containers/singularity
+containers/docker
+containers/sources
+containers/downloads
+containers/tmp
+.nextflow
+run

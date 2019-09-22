@@ -1,124 +1,575 @@
 #!/usr/bin/env nextflow
 
+/*
+vim: syntax=groovy
+-*- mode: groovy;-*-
+*/
 
-params.vcf = "$baseDir/data/filtered_ann.vcf.gz"
-params.genes = "$baseDir/data/SN15v9_OM_ChromOnly.gff3"
-params.bed = "$baseDir/data/single_97pc_regions.bedgraph"
 
-vcfFile = file(params.vcf)
-bedFile = file(params.bed)
+def helpMessage() {
+    log.info"""
+    # snptree
+
+    ## Usage
+
+    ```bash
+    ```
+
+    ## Parameters
+
+    ## Output
+
+    ## Exit codes
+
+    - 0: All ok.
+    - 1: Incomplete parameter inputs.
+
+    """.stripIndent()
+}
+
+if (params.help) {
+    helpMessage()
+    exit 0
+}
+
+// The vcf to use for the analysis
+params.vcf = false
+
+// The reference isolate name.
+// If this is not provided, the reference isolate will be called "REF"
+params.ref_name = false
+
+// A regular gene-format gff3 file containing CDS features to find SNPs in genes from.
+// Will also form partitions if neither occultercut or nopartitions is used.
+params.genes = false
+
+// A bed-file with the ID in the 4th column to use as partitions instead of the genes or occultercut.
+params.partitions = false
+
+// A fasta formatted file of SNPs
+params.fasta = false
+
+// If fasta is and you want partitions this should be an IQtree formatted partitions file for the fasta.
+params.fasta_partitions = false
+
+// A fasta file of the reference genome to find partitions in, based on on nucleotide content, and use those as partitions.
+params.occultercut = false
+
+// Don't use any partitions.
+params.nopartition = false
+
+// Minimum non-major allele frequency.
+params.min_af = 0.05
+
+// The maximum amount of missing data (or gaps) that can be present per locus.
+params.max_missing = 0.05
+
+// Default cmax
+params.cmax = params.nopartition ? 15 : 10
+
+// Default rcluster.
+// Reduce to ~10 if finding model takes a long time.
+params.rcluster = 50
+
+run_select_vcf = !params.fasta
+use_genes_as_partitions = (
+    !params.partitions &&
+    !params.occultercut &&
+    run_select_vcf
+)
+run_occultercut = (
+    params.occultercut &&
+    !params.nopartition &&
+    !params.partitions &&
+    run_select_vcf
+)
+
+
+
+if ( params.vcf ) {
+    Channel
+        .fromPath(params.vcf, checkIfExists: true, type: "file")
+        .first()
+        .set {vcf}
+} else if ( run_select_vcf ) {
+    log.error "Either a VCF of Fasta file of the SNPs must be provided."
+    exit 1
+} else {
+    Channel.empty()
+}
+
+
+if ( params.genes ) {
+    Channel
+        .fromPath(params.genes, checkIfExists: true, type: "file")
+        .first()
+        .set {genes}
+} else if ( run_select_vcf ) {
+    log.error "A gene GFF3 file is required if selecting SNPs from a vcf."
+    exit 1
+} else {
+    Channel.empty()
+}
+
+
+if ( params.partitions ) {
+    Channel
+        .fromPath(params.partitions, checkIfExists: true, type: "file")
+        .first()
+        .set {userPartitions}
+} else {
+    userPartitions = Channel.empty()
+}
+
+
+if ( params.fasta ) {
+    Channel
+        .fromPath(params.fasta, checkIfExists: true, type: "file")
+        .first()
+        .set {userFasta}
+} else {
+    userFasta = Channel.empty()
+}
+
+
+if ( params.fasta_partitions ) {
+    Channel
+        .fromPath(params.fasta_partitions, checkIfExists: true, type: "file")
+        .first()
+        .set {userFastaPartitions}
+} else if ( params.fasta && !params.nopartition ) {
+    log.error "You provided a fasta file but no fasta_partitions. " +
+              "Please provide the partitions or use --nopartitions flag " +
+              "to disable."
+    exit 1
+} else {
+    userFastaPartitions = Channel.empty()
+}
+
+
+if ( params.occultercut ) {
+    Channel
+        .fromPath(params.occultercut, checkIfExists: true, type: "file")
+        .first()
+        .set {genome}
+} else {
+    genome = Channel.empty()
+}
+
 
 
 process applyFilters {
-    container "quay.io/biocontainers/bcftools:1.9--h4da6232_0"
+    label "htslib"
+    label "small_task"
+
+    when:
+    run_select_vcf
 
     input:
-    file vcf from vcfFile
+    file input_vcf from vcf
 
     output:
-    file "${vcf.baseName}_filtered.vcf" into filteredVcf
+    file "filtered.vcf" into filteredVcf
 
+    script:
     """
-    bcftools view --types snps ${vcf} \
-    | bcftools view -f".,PASS" -O v - \
+    bcftools view \
+        --include 'TYPE="snp" && F_PASS(GT ~ "\\.") < ${params.max_missing}' \
+        --exclude-types "indels,mnps,bnd,other" \
+        --apply-filters ".,PASS" \
+        --min-af "${params.min_af}:nonmajor" \
+        --output-type v \
+        "${input_vcf}" \
     | uniq \
-    > "${vcf.baseName}_filtered.vcf"
-    """
-}
-
-process intersectVcfBed {
-    container "quay.io/biocontainers/bedtools:2.27.1--1"
-    publishDir "intersectBedVcf"
-
-    input:
-    file vcf from filteredVcf
-    file bed from bedFile
-
-    output:
-    file "${vcf.baseName}_intersect.vcf" into intersectedVcf
-
-    """
-    bedtools intersect -a ${vcf} -b ${bed} -u -header | uniq > ${vcf.baseName}_intersect.vcf
+    > "filtered.vcf"
     """
 }
 
 
 process selectInformative {
-    container "quay.io/biocontainers/snpsift:4.3.1t--1"
-    publishDir "selectInformative"
+    label "snpeff"
+    label "small_task"
+
+    publishDir "${params.outdir}/select_vcf"
+
+    when:
+    run_select_vcf
 
     input:
-    file vcf from intersectedVcf
+    file vcf from filteredVcf
 
     output:
-    file "${vcf.baseName}_informative.vcf" into informativeVcf
+    file "informative.vcf" into informativeVcf
 
+    script:
     """
-    SnpSift filter "(ANN[*].EFFECT == 'missense_variant') || (ANN[*].EFFECT == 'synonymous_variant')" ${vcf} > "${vcf.baseName}_informative.vcf"
+    SnpSift \
+      filter \
+      -s <(echo -e 'LOW\\nMODIFIER\\n') \
+      "(ANN[*].EFFECT has 'synonymous_variant') && (ANN[*].IMPACT in SET[0])" \
+      "${vcf}" \
+    > "informative.vcf"
     """
 }
 
 
-process snpToFasta {
-    container "quay.io/biocontainers/vcfkit:0.1.6--py27h24bf2e0_2"
-    publishDir "snpToFasta"
+process vcfToTsv {
+    label "htslib"
+    label "small_task"
+
+    publishDir "${params.outdir}/select_vcf"
+
+    when:
+    run_select_vcf
 
     input:
     file vcf from informativeVcf
 
     output:
-    file "${vcf.baseName}.fasta" into informativeFasta
+    file "informative.tsv" into informativeTsv
+
+    script:
+    convert_ref = params.ref_name ? "| sed '1s/REF/${params.ref_name}/'" : ""
 
     """
-    vk phylo fasta ${vcf} > ${vcf.baseName}.fasta
+    bcftools query \
+      --print-header \
+      --format "%CHROM\\t%POS0\\t%END\\t%REF[\\t%TGT]\\n" \
+      "${vcf}" \
+    | sed '1s/\\[[[:digit:]]*\\]//g' \
+    | sed '1s/:GT//g' \
+    ${convert_ref} \
+    > "informative.tsv"
     """
 }
 
 
-process variantFasta {
-    container "quay.io/biocontainers/biopython:1.70--np112py36_1"
-    publishDir "snpToFasta"
+process genesGFFToBed {
+
+    label "bedtools"
+    label "small_task"
+
+    publishDir "${params.outdir}/select_vcf"
+
+    when:
+    use_genes_as_partitions
 
     input:
-    file vcf from informativeFasta
+    file "genes.gff3" from genes
 
     output:
-    file "${vcf.baseName}_variant.fasta" into varFasta
+    file "genes.bed" into geneBED
 
+    script:
     """
-    #!/usr/bin/env python3
-    
-    from Bio import AlignIO
-    
-    msa = AlignIO.read("${vcf}", format="fasta")
-    
-    to_kill = []
-    for i, col in enumerate(zip(*msa)):
-        col = list(filter(lambda x: x in ('A', 'T', 'G', 'C'), col))
-        if all(col[0] == base for base in col[1:]):
-            to_kill.append(i)
-    
-    # Later we add +1 to i so use -1 to get 0.
-    to_kill.insert(0, -1)
-    to_kill.append(msa.get_alignment_length())
-    
-    # Run through the columns and construct new msa excluding killed sites.
-    sub_msas = None
-    for i, j in zip(to_kill, to_kill[1:]):
-        i = i + 1
-        if i == j:
-            continue
-        
-        if sub_msas is None:
-            sub_msas = msa[:, i:j]
-        else:
-            sub_msas += msa[:, i:j]
-    
-    AlignIO.write(sub_msas, "${vcf.baseName}_variant.fasta", format="fasta")
+    gawk '
+      BEGIN {OFS="\\t"}
+      \$3 == "CDS" {
+        n=gensub(/.*Parent\\s*=\\s*([^;\\n]+).*/, "\\\\1", "g", \$9);
+        print \$1, \$4 - 1, \$5, n
+      }' \
+      genes.gff3 \
+    | bedtools groupby -g 4 -c 1,2,3 -o first,min,max \
+    | awk 'BEGIN {OFS="\\t"} {print \$2, \$3, \$4, \$1}' \
+    | sort -k1,1 -k2,2n -k3,3n \
+    | bedtools merge -c 4 -o first \
+    > genes.bed
     """
 }
 
 
+process runOcculterCut {
+
+    label "occultercut"
+    label "small_task"
+
+    publishDir "${params.outdir}/occultercut"
+
+    when:
+    run_occultercut
+
+    input:
+    file fasta from genome
+
+    output:
+    file "occultercut_regions.bed" into occulterCutBED
+    file "occultercut_regions.gff3"
+    file "occultercut.png"
+    file "occultercut_composition_gc.txt"
+    file "occultercut_my_genome.txt"
+    file "occultercut_grouped_regions.gff3" optional true
+    file "occultercut_nuc_frequencies.R*" optional true
+
+    script:
+    """
+    OcculterCut -f "${fasta}"
+
+
+    sed -i '1i set terminal pngcairo size 900,600 enhanced font "Helvetica,20"' plot.plt
+    sed -i '1a set output "plot.png"' plot.plt
+    gnuplot plot.plt
+
+    mv plot.png "occultercut.png"
+
+    mv compositionGC.txt "occultercut_composition_gc.txt"
+    mv regions.gff3 "occultercut_regions.gff3"
+    mv myGenome.txt "occultercut_my_genome.txt"
+
+    if [ -e groupedRegions.gff3 ]
+    then
+      mv groupedRegions.gff3 "occultercut_grouped_regions.gff3"
+    fi
+
+    for f in nuc_frequencies.R*
+    do
+      mv "\${f}" "occultercut_\${f}"
+    done
+
+    gawk '
+      BEGIN {OFS="\\t"}
+      {
+        n=gensub(/.*ID\\s*=\\s*([^;\\n]+).*/, "\\\\1", "g", \$9);
+        print \$1, \$4 - 1, \$5, n
+      }' \
+      occultercut_regions.gff3 \
+    > occultercut_regions.bed
+    """
+}
+
+
+if ( use_genes_as_partitions ) {
+    partitionBed = geneBED
+} else if ( run_occultercut ) {
+    partitionBed = occulterCutBED
+} else {
+    partitionBed = userPartitions
+}
+
+
+process getIntersectingGenes {
+    label "bedtools"
+    label "small_task"
+
+    publishDir "${params.outdir}/select_vcf"
+
+    when:
+    run_select_vcf
+
+    input:
+    set file("informative.tsv"),
+        file("partitions.bed") from informativeTsv
+            .combine(partitionBed)
+
+    output:
+    file "informative_with_partitions.tsv" into informativePartitionsTSV
+
+    script:
+    """
+    bedtools intersect \
+      -a informative.tsv \
+      -b partitions.bed \
+      -wa \
+      -wb \
+      -header \
+      -sortout \
+    > informative_with_partitions.tsv
+    """
+}
+
+
+process getFasta {
+
+    label "python3"
+    label "small_task"
+
+    publishDir "${params.outdir}/select_vcf"
+
+    when:
+    run_select_vcf
+
+    input:
+    file "informative_with_partitions.tsv" from informativePartitionsTSV
+
+    output:
+    set file("snps.fasta"), file("partitions.txt") into fastaForTree
+
+    script:
+    """
+    tsv2fasta.py \
+      -o snps.fasta \
+      -p partitions.txt \
+      informative_with_partitions.tsv
+    """
+}
+
+
+fastaForTree.into {
+    fastaForTree4FindBestPartitionedModelForTree;
+    fastaForTree4RunPartitionTreeBootstraps;
+    fastaForTree4FindBestModelForTree;
+    fastaForTree4RunTreeBootstraps;
+}
+
+process findBestPartitionedModelForTree {
+
+    label "iqtree"
+    label "big_task"
+
+    publishDir "${params.outdir}/tree"
+
+    when:
+    !params.nopartition
+
+    input:
+    set file("snps.fasta"),
+        file("partitions.txt") from fastaForTree4FindBestPartitionedModelForTree
+
+    output:
+    file "partitions.txt.best_scheme.nex" into partitionModel
+
+    script:
+    def cmax = params.cmax
+    def rcluster = params.rcluster
+
+    """
+    iqtree \
+      -nt AUTO \
+      -ntmax "${task.cpus}" \
+      -s snps.fasta \
+      -st DNA \
+      -m "MF+ASC" \
+      -mset "GTR,JC,F81,K80,HKY,K81" \
+      -cmax "${cmax}" \
+      -rcluster "${rcluster}" \
+      -safe \
+      -spp partitions.txt
+
+    # -mem "${task.memory.toGiga()}G"
+    """
+}
+
+
+process runPartitionTreeBootstraps {
+
+    label "iqtree"
+    label "big_task"
+
+    publishDir "${params.outdir}/tree"
+
+    when:
+    !params.nopartition
+
+    input:
+    set val(chunk),
+        file("snps.fasta"),
+        file("partitions.txt"),
+        file("partitions.nex") from Channel.from( 1, 2, 3, 4, 5 )
+            .combine(fastaForTree4RunPartitionTreeBootstraps)
+            .combine(partitionModel)
+
+    script:
+    """
+    iqtree \
+      -nt "${task.cpus}" \
+      -s snps.fasta \
+      -spp partitions.nex \
+      -bo 20 \
+      -bb 1000 \
+      -alrt 1000 \
+      -bspec GENESITE \
+      -bnni \
+      -wbt \
+      -st DNA \
+      -pre "chunk${chunk}"
+    """
+}
+
+
+process findBestModelForTree {
+
+    label "iqtree"
+    label "big_task"
+
+    publishDir "${params.outdir}/tree/model_finder"
+
+    when:
+    params.nopartition
+
+    input:
+    set file("snps.fasta"),
+        file("partitions.txt") from fastaForTree4FindBestModelForTree
+
+    output:
+    file "selected_model.txt" into model
+    file "snps.fasta.model.gz"
+    file "snps.fasta.iqtree"
+    file "snps.fasta.log"
+    file "snps.fasta.treefile"
+
+    script:
+    def cmax = params.cmax
+    def rcluster = params.rcluster
+
+    """
+    iqtree \
+      -nt AUTO \
+      -ntmax "${task.cpus}" \
+      -s snps.fasta \
+      -st DNA \
+      -m "MF+ASC" \
+      -mset "GTR,JC,F81,K80,HKY,K81" \
+      -cmax "${cmax}" \
+      -rcluster "${rcluster}" \
+      -safe
+
+    awk '
+      /^Best-fit model/ {
+        n=gensub(/.*:\\s*(\\S+).*/, "\\\\1", "g", \$0);
+        print n
+    }' < snps.fasta.log \
+    > selected_model.txt
+    """
+}
+
+
+/*
+*/
+process runTreeBootstraps {
+
+    label "iqtree"
+    label "big_task"
+
+    publishDir "${params.outdir}/tree"
+
+    when:
+    params.nopartition
+
+    input:
+    set val(chunk),
+        file("snps.fasta"),
+        file("partitions.txt"),
+        file("selected_model.txt") from Channel.from( 1, 2, 3, 4, 5 )
+            .combine(fastaForTree4RunTreeBootstraps)
+            .combine(model)
+
+    script:
+    """
+    iqtree \
+      -nt "${task.cpus}" \
+      -s snps.fasta \
+      -m "\$(cat selected_model.txt)" \
+      -bb 1000 \
+      -alrt 1000 \
+      -bo 20 \
+      -bnni \
+      -wbt \
+      -st DNA \
+      -pre "chunk${chunk}"
+    """
+}
+
+
+/*
 process tree {
     container "quay.io/biocontainers/raxml:8.2.10--h470a237_1"
     publishDir "tree"
@@ -212,4 +663,4 @@ process annot {
         -n bs_tree
     """
 }
-
+*/
