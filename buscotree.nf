@@ -491,7 +491,7 @@ process runPartitionTreeBootstraps {
 
     input:
     set val(chunk),
-        file("snps.fasta"),
+        file("alignment.fasta"),
         file("partitions.txt"),
         file("partitions.nex") from Channel.from( 1, 2, 3, 4, 5 )
             .combine(joinedAlignments4RunPartitionTreeBootstraps)
@@ -501,13 +501,12 @@ process runPartitionTreeBootstraps {
     """
     iqtree \
       -nt "${task.cpus}" \
-      -s snps.fasta \
+      -s alignment.fasta \
       -spp partitions.nex \
       -bo 20 \
       -bb 1000 \
       -alrt 1000 \
       -bspec GENESITE \
-      -bnni \
       -wbt \
       -st DNA \
       -pre "chunk${chunk}"
