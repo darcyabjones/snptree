@@ -91,7 +91,7 @@ def parse_alignments(alignment_files, trim, exclude):
         else:
             trim_amount = 0
 
-        og = os.path.splitext(alignment_file)[0]
+        og = os.path.split(os.path.splitext(alignment_file)[0])[-1]
         row = {}
         for seq in alignment:
             isolates.add(seq.id)
@@ -102,7 +102,7 @@ def parse_alignments(alignment_files, trim, exclude):
                 last_pos = alignment.get_alignment_length() - trim_amount
                 row[seq.id] = str(seq.seq)[:last_pos]
 
-            alignments.append((og, row))
+        alignments.append((og, row))
 
     return isolates, alignments
 
@@ -150,6 +150,7 @@ def write_partition(partitions, handle, kind="DNA"):
         in partitions
     ]
     handle.write("\n".join(strings))
+    handle.write("\n")
     return
 
 
