@@ -71,15 +71,16 @@ params.augustus_config = false
 // The maximum proportion of gaps in an alignment column that is allowed.
 // 1 means only filter out columns that are all gaps.
 // 0 means filter all columns any gaps.
-params.max_missing = 0.1
+params.max_missing = 0.2
+params.min_entropy = 1
 
 // The genetic code to use to translate codons.
 // Should be a number corresponding to one of the NCBI translation tables.
 params.gencode = 1
 
 
-def run_busco = !( params.buscos || params.ogs || params.alignments || params.tidy )
-def run_ogs = !( params.ogs || params.alignments || params.tidy )
+def run_busco = !( params.buscos || params.ogs || params.alignments || params.tidied )
+def run_ogs = !( params.ogs || params.alignments || params.tidied )
 def run_align = !( params.alignments ||  params.tidied )
 def run_tidy = ! params.tidied
 
@@ -156,6 +157,9 @@ if ( params.augustus_config ) {
         label "busco"
         label "small_task"
 
+        when:
+        run_busco
+
         output:
         file "config" into augustusConfig
 
@@ -194,6 +198,8 @@ process runBusco {
     file "${name}" into buscoResultsComputed
 
     script:
+    species = params.augustus_species ? "--species ${params.augustus_species} " : ""
+
     """
     export AUGUSTUS_CONFIG_PATH="\${PWD}/augustus_config"
 
@@ -202,7 +208,7 @@ process runBusco {
       --out "${name}" \
       --cpu ${task.cpus} \
       --mode "genome" \
-      --species "${params.augustus_species}" \
+      ${species} \
       --lineage_path "lineage"
 
     mv "run_${name}" "${name}"
@@ -292,9 +298,9 @@ process alignOGs {
     file "og_alignments" into computedOGAlignments
 
     script:
-    // TODO add gencode option for align.
     """
     mkdir og_alignments
+
     find \
       families/ \
       \\( -name "*.fasta" -or -name "*.fa" -or -name "*.fna" -or -name "*.fas" \\) \
@@ -304,7 +310,12 @@ process alignOGs {
         -P "${task.cpus}" \
         -I {} \
         -- \
-        run_decipher.R "families/{}" "og_alignments/{}"
+        run_decipher.R \
+          --infile "families/{}" \
+          --outfile "og_alignments/{}" \
+          --gencode "${params.gencode}" \
+          --maxgap "${params.max_missing}" \
+          --minentropy "${params.min_entropy}"
     """
 }
 
@@ -362,33 +373,24 @@ if ( params.tidied ) {
 
 process makePartitionFile {
 
-    label "posix"
+    label "python3"
     label "small_task"
 
     input:
     file "alignments" from tidiedAlignments
 
     output:
-    set file("partitions.nex"),
-        file("alignments") into alignmentWithPartitions
+    set file("joined_alignment.fasta"),
+        file("partitions.txt") into alignmentWithPartitions
 
     script:
     """
-    echo "#nexus" > partitions.nex
-    echo "begin sets;" >> partitions.nex
-
-    for FILE in alignments/*
-    do
-      BASENAME=\$(basename \${FILE%.*})
-      if [ -s "\${FILE}" ]
-      then
-        echo "    charset \${BASENAME} = \${FILE}:CODON, *;" >> partitions.nex
-      else
-        echo "\${FILE} was empty" 1>&2
-      fi
-    done
-
-    echo "end;" >> partitions.nex
+    join_alignments.py \
+      --trim \
+      --outfasta "joined_alignment.fasta" \
+      --outpartition "partitions.txt" \
+      --type DNA \
+      alignments/*
     """
  }
 
@@ -401,8 +403,8 @@ process findBestModelForTree {
     publishDir "${params.outdir}/selected_models"
 
     input:
-    set file("partitions.nex"),
-        file("alignments") from alignmentWithPartitions
+    set file("alignment.fasta"),
+        file("partitions.txt") from alignmentWithPartitions
 
     script:
     def cmax = 10
@@ -419,9 +421,8 @@ process findBestModelForTree {
       -cmax "${cmax}" \
       -rcluster "${rcluster}" \
       -safe \
-      -spp partitions.nex
-
-    #-mem "${task.memory.toGiga()}G"
+      -s alignment.fasta \
+      -spp partitions.txt
     """
 }
 

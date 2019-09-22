@@ -470,7 +470,8 @@ process runPartitionTreeBootstraps {
     script:
     """
     iqtree \
-      -nt "${task.cpus}" \
+      -nt AUTO \
+      -ntmax "${task.cpus}" \
       -s snps.fasta \
       -spp partitions.nex \
       -bo 20 \
@@ -555,7 +556,8 @@ process runTreeBootstraps {
     script:
     """
     iqtree \
-      -nt "${task.cpus}" \
+      -nt AUTO \
+      -ntmax "${task.cpus}" \
       -s snps.fasta \
       -m "\$(cat selected_model.txt)" \
       -bb 1000 \
