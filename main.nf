@@ -72,18 +72,19 @@ params.cmax = params.nopartition ? 15 : 10
 params.rcluster = 50
 
 run_select_vcf = !params.fasta
+
 use_genes_as_partitions = (
     !params.partitions &&
     !params.occultercut &&
     run_select_vcf
 )
+
 run_occultercut = (
     params.occultercut &&
     !params.nopartition &&
     !params.partitions &&
     run_select_vcf
 )
-
 
 
 if ( params.vcf ) {
