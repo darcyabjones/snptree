@@ -52,12 +52,19 @@ params.ogs = false
 // The fasta ids will be used as species.
 params.alignments = false
 
-// Tidied OG codon alignments to use.
-// Should be a directory of ".fasta" files.
-// File basenames will be used as OG names.
-// The fasta ids will be used as species.
-// No additional filtering will be done on these files.
-params.tidied = false
+// Tidied OG codon alignment to use.
+// Should be a single fasta file containing the concatenated codon alignments.
+// No additional filtering will be done on this file.
+// This should be accompanied by a partitioned file or a model file.
+params.joined = false
+
+// A nexus or RaxML formatted partition file to use alongside the tidied fasta.
+params.partitions = false
+
+// A nexus file containing the partitions and models to use for iqtree.
+// Should be used alongside tidied.
+params.model = false
+
 
 // A folder containing the BUSCO lineage files.
 params.busco_lineage = false
@@ -79,10 +86,12 @@ params.min_entropy = 1
 params.gencode = 1
 
 
-def run_busco = !( params.buscos || params.ogs || params.alignments || params.tidied )
-def run_ogs = !( params.ogs || params.alignments || params.tidied )
-def run_align = !( params.alignments ||  params.tidied )
-def run_tidy = ! params.tidied
+def run_busco = !( params.buscos || params.ogs || params.alignments || params.joined )
+def run_ogs = !( params.ogs || params.alignments || params.joined )
+def run_align = !( params.alignments ||  params.joined )
+def run_join = ! params.joined
+def run_model_finder = ! params.model
+
 
 if ( params.genomes ) {
     Channel.fromPath(params.genomes, checkIfExists: true, type: "file")
@@ -134,11 +143,34 @@ if ( params.alignments ) {
 }
 
 
-if ( params.tidied ) {
+if ( params.joined ) {
     Channel
-        .fromPath(params.tidied, checkIfExists: true, type: "dir")
+        .fromPath(params.joined, checkIfExists: true, type: "file")
         .first()
-        .set { userTidied }
+        .set { userJoined }
+} else if ( !run_align && !(params.partitions || params.model) ) {
+    log.error "You provided a tidied/joined fasta but not a partition or model file."
+    exit 1
+}
+
+
+if ( params.partitions ) {
+    Channel
+        .fromPath(params.partitions, checkIfExists: true, type: "file")
+        .first()
+        .set { userPartitions }
+} else {
+    userPartitions = Channel.empty()
+}
+
+
+if ( params.model ) {
+    Channel
+        .fromPath(params.model, checkIfExists: true, type: "file")
+        .first()
+        .set { userModel }
+} else {
+    userModel = Channel.empty()
 }
 
 
@@ -237,12 +269,13 @@ if ( params.buscos ) {
         find \
           -L \
           . \
+          -maxdepth 1 \
           -type d \
           -path ./buscos -prune \
           -o \
           -not -path . \
           -printf '%f\\0' \
-        | xargs -I {} -- cp "{}" "buscos/{}"
+        | xargs -0 -I {} -- cp -r -L "{}" "buscos/{}"
         """
     }
 }
@@ -334,14 +367,11 @@ process tidyCodonAlignments {
 
     publishDir "${params.outdir}"
 
-    when:
-    run_tidy
-
     input:
     file "alignments" from ogAlignments
 
     output:
-    file "tidied_alignments" into computedTidiedAlignments
+    file "tidied_alignments" into tidiedAlignments
 
     script:
     """
@@ -364,24 +394,22 @@ process tidyCodonAlignments {
 }
 
 
-if ( params.tidied ) {
-    tidiedAlignments = userTidied
-} else {
-    tidiedAlignments = computedTidiedAlignments
-}
-
-
-process makePartitionFile {
+process joinAlignments {
 
     label "python3"
     label "small_task"
+
+    publishDir "${params.outdir}/joined_alignments"
+
+    when:
+    run_join
 
     input:
     file "alignments" from tidiedAlignments
 
     output:
     set file("joined_alignment.fasta"),
-        file("partitions.txt") into alignmentWithPartitions
+        file("partitions.txt") into computedJoinedAlignments
 
     script:
     """
@@ -395,6 +423,18 @@ process makePartitionFile {
  }
 
 
+if ( params.joined && run_model_finder ) {
+    joinedAlignments = userJoined.combine(userPartitions)
+} else {
+    joinedAlignments = computedJoinedAlignments
+}
+
+
+joinedAlignments.into {
+    joinedAlignments4FindBestModelForTree;
+    joinedAlignments4RunPartitionTreeBootstraps;
+}
+
 process findBestModelForTree {
 
     label "iqtree"
@@ -402,9 +442,15 @@ process findBestModelForTree {
 
     publishDir "${params.outdir}/selected_models"
 
+    when:
+    run_model_finder
+
     input:
     set file("alignment.fasta"),
-        file("partitions.txt") from alignmentWithPartitions
+        file("partitions.txt") from joinedAlignments4FindBestModelForTree
+
+    output:
+    file "partitions.txt.best_scheme.nex" into computedModel
 
     script:
     def cmax = 10
@@ -427,7 +473,15 @@ process findBestModelForTree {
 }
 
 
+if ( params.model ) {
+    model = userModel
+} else {
+    model = computedModel
+}
+
+
 /*
+ */
 process runPartitionTreeBootstraps {
 
     label "iqtree"
@@ -435,16 +489,13 @@ process runPartitionTreeBootstraps {
 
     publishDir "${params.outdir}/tree"
 
-    when:
-    !params.nopartition
-
     input:
     set val(chunk),
         file("snps.fasta"),
         file("partitions.txt"),
         file("partitions.nex") from Channel.from( 1, 2, 3, 4, 5 )
-            .combine(fastaForTree4RunPartitionTreeBootstraps)
-            .combine(partitionModel)
+            .combine(joinedAlignments4RunPartitionTreeBootstraps)
+            .combine(model)
 
     script:
     """
@@ -462,4 +513,3 @@ process runPartitionTreeBootstraps {
       -pre "chunk${chunk}"
     """
 }
-*/
