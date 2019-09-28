@@ -450,7 +450,7 @@ process findBestPartitionedModelForTree {
 }
 
 
-process runPartitionTreeBootstraps {
+process runPartitionTreeUFBootstraps {
 
     label "iqtree"
     label "big_task"
@@ -461,11 +461,9 @@ process runPartitionTreeBootstraps {
     !params.nopartition
 
     input:
-    set val(chunk),
-        file("snps.fasta"),
+    set file("snps.fasta"),
         file("partitions.txt"),
-        file("partitions.nex") from Channel.from( 1, 2, 3, 4, 5 )
-            .combine(fastaForTree4RunPartitionTreeBootstraps)
+        file("partitions.nex") from fastaForTree4RunPartitionTreeBootstraps
             .combine(partitionModel)
 
     script:
@@ -475,13 +473,17 @@ process runPartitionTreeBootstraps {
       -ntmax "${task.cpus}" \
       -s snps.fasta \
       -spp partitions.nex \
-      -bo 20 \
-      -bb 1000 \
+      -bb 10000 \
+      -bnni \
       -alrt 1000 \
       -bspec GENESITE \
       -wbt \
+      -wsr \
+      -wspr \
+      -wslr \
+      -alninfo \
       -st DNA \
-      -pre "chunk${chunk}"
+      -pre iqtree_partition
     """
 }
 
@@ -535,23 +537,24 @@ process findBestModelForTree {
 
 /*
 */
-process runTreeBootstraps {
+process runTreeUFBootstraps {
 
     label "iqtree"
     label "big_task"
 
-    publishDir "${params.outdir}/tree"
+    publishDir "${params.outdir}/snptree"
 
     when:
     params.nopartition
 
     input:
-    set val(chunk),
-        file("snps.fasta"),
+    set file("snps.fasta"),
         file("partitions.txt"),
-        file("selected_model.txt") from Channel.from( 1, 2, 3, 4, 5 )
-            .combine(fastaForTree4RunTreeBootstraps)
+        file("selected_model.txt") from fastaForTree4RunTreeBootstraps
             .combine(model)
+
+    output:
+    file "iqtree_nopartition.*"
 
     script:
     """
@@ -560,12 +563,16 @@ process runTreeBootstraps {
       -ntmax "${task.cpus}" \
       -s snps.fasta \
       -m "\$(cat selected_model.txt)" \
-      -bb 1000 \
+      -bb 10000 \
+      -bnni \
       -alrt 1000 \
-      -bo 20 \
       -wbt \
+      -wsr \
+      -wspr \
+      -wslr \
+      -alninfo \
       -st DNA \
-      -pre "chunk${chunk}"
+      -pre iqtree_nopartition
     """
 }
 
