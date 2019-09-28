@@ -206,9 +206,7 @@ genomes.set { genomes4Busco }
 
 
 /*
- * Evaluate genome completeness with BUSCO on the genomes.
- * Later we evaluate each gene prediction set too.
- * Could compare this number with that one.
+ * TODO: Busco seems to return 0 even on error, need to check stderr for error logs.
  */
 process runBusco {
     label "busco"
@@ -275,7 +273,7 @@ if ( params.buscos ) {
           -o \
           -not -path . \
           -printf '%f\\0' \
-        | xargs -0 -I {} -- cp -r -L "{}" "buscos/{}"
+        | xargs -0 -I {} -- ln -sf "\${PWD}/{}" "\${PWD}/buscos/{}"
         """
     }
 }
