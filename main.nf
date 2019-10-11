@@ -444,7 +444,7 @@ process findBestPartitions {
       -mset "GTR" \
       -cmax 5 \
       -rclusterf "${rcluster}" \
-      -rclustermax 5000 \
+      -rcluster-max 5000 \
       -safe \
       -spp partitions.txt
 
@@ -468,7 +468,7 @@ process findBestPartitionsModel {
     set file("snps.fasta"),
         file("partitions.txt"),
         file("best_partitions.nex") from fastaForTree4FindBestPartitionsModel
-            .combine(partitionModel)
+            .combine(bestPartitions)
 
     output:
     file "best_model.nex" into partitionModel

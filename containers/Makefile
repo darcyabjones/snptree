@@ -34,6 +34,11 @@ IQTREE_VERSION=1.6.12
 IQTREE_URL=https://github.com/Cibiv/IQ-TREE/archive/v1.6.12.tar.gz
 IQTREE_PREFIX_ARG=$(INSTALL_BASE)/iqtree/$(IQTREE_VERSION)
 
+RAXML_COMMIT=66ad9d2
+RAXML_REPO=https://github.com/amkozlov/raxml-ng.git
+RAXML_PREFIX_ARG=$(INSTALL_BASE)/raxml/$(RAXML_COMMIT)
+
+
 BUSCO_COMMIT=1554283ab8ee7dd5b5290f4f748234f456c36e66
 BUSCO_REPO=https://gitlab.com/ezlab/busco.git
 BUSCO_PREFIX_ARG=$(INSTALL_BASE)/busco/$(BUSCO_COMMIT)
@@ -51,7 +56,7 @@ OCCULTERCUT_URL=https://downloads.sourceforge.net/project/occultercut/OcculterCu
 OCCULTERCUT_PREFIX_ARG=$(INSTALL_BASE)/occultercut/$(OCCULTERCUT_VERSION)
 
 GENERAL=bedtools python3 posix htslib snpeff busco decipher occultercut
-PHYLOGENETICS=iqtree
+PHYLOGENETICS=iqtree raxml
 
 OPEN=$(GENERAL) $(PHYLOGENETICS)
 
@@ -208,6 +213,18 @@ docker/iqtree: iqtree.Dockerfile docker/base
 	  --build-arg IQTREE_VERSION="$(IQTREE_VERSION)" \
 	  --build-arg IQTREE_URL="$(IQTREE_URL)" \
 	  --build-arg IQTREE_PREFIX_ARG="$(IQTREE_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+
+
+docker/raxml: raxml.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg RAXML_COMMIT="$(RAXML_COMMIT)" \
+	  --build-arg RAXML_REPO="$(RAXML_REPO)" \
+	  --build-arg RAXML_PREFIX_ARG="$(RAXML_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
