@@ -405,13 +405,15 @@ process getFasta {
 
 
 fastaForTree.into {
-    fastaForTree4FindBestPartitionedModelForTree;
+    fastaForTree4FindBestPartitions;
+    fastaForTree4FindBestPartitionsModel;
     fastaForTree4RunPartitionTreeBootstraps;
     fastaForTree4FindBestModelForTree;
     fastaForTree4RunTreeBootstraps;
 }
 
-process findBestPartitionedModelForTree {
+
+process findBestPartitions {
 
     label "iqtree"
     label "big_task"
@@ -423,10 +425,53 @@ process findBestPartitionedModelForTree {
 
     input:
     set file("snps.fasta"),
-        file("partitions.txt") from fastaForTree4FindBestPartitionedModelForTree
+        file("partitions.txt") from fastaForTree4FindBestPartitions
 
     output:
-    file "partitions.txt.best_scheme.nex" into partitionModel
+    file "best_partitions.nex" into bestPartitions
+
+    script:
+    def cmax = 5
+    def rcluster = params.rcluster
+
+    """
+    iqtree \
+      -nt AUTO \
+      -ntmax "${task.cpus}" \
+      -s snps.fasta \
+      -st DNA \
+      -m "TESTNEWONLY+ASC+MERGE" \
+      -mset "GTR" \
+      -cmax 5 \
+      -rclusterf "${rcluster}" \
+      -rclustermax 5000 \
+      -safe \
+      -spp partitions.txt
+
+    mv partitions.txt.best_scheme.nex best_partitions.nex
+    # -mem "${task.memory.toGiga()}G"
+    """
+}
+
+
+process findBestPartitionsModel {
+
+    label "iqtree"
+    label "big_task"
+
+    publishDir "${params.outdir}/tree"
+
+    when:
+    !params.nopartition
+
+    input:
+    set file("snps.fasta"),
+        file("partitions.txt"),
+        file("best_partitions.nex") from fastaForTree4FindBestPartitionsModel
+            .combine(partitionModel)
+
+    output:
+    file "best_model.nex" into partitionModel
 
     script:
     def cmax = params.cmax
@@ -438,17 +483,17 @@ process findBestPartitionedModelForTree {
       -ntmax "${task.cpus}" \
       -s snps.fasta \
       -st DNA \
-      -m "MF+ASC+MERGE" \
+      -m "MF+ASC" \
       -mset "GTR,JC,F81,K80,HKY,K81" \
       -cmax "${cmax}" \
       -rcluster "${rcluster}" \
       -safe \
       -spp partitions.txt
 
+    mv partitions.txt.best_scheme.nex best_model.nex
     # -mem "${task.memory.toGiga()}G"
     """
 }
-
 
 process runPartitionTreeUFBootstraps {
 
