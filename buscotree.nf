@@ -459,7 +459,7 @@ process findBestModelForTree {
     iqtree \
       -nt AUTO \
       -ntmax "${task.cpus}" \
-      -st CODON${gencode} \
+      -st "CODON${gencode}" \
       -m "MF+MERGE" \
       -mset "GY2K,MG2K,ECMK07,ECMK07_GY2K" \
       -cmax "${cmax}" \
@@ -485,14 +485,13 @@ process runPartitionTreeBootstraps {
     label "iqtree"
     label "big_task"
 
-    publishDir "${params.outdir}/tree"
+    publishDir "${params.outdir}/buscotree"
 
     input:
     set val(chunk),
         file("alignment.fasta"),
         file("partitions.txt"),
-        file("partitions.nex") from Channel.from( 1, 2, 3, 4, 5 )
-            .combine(joinedAlignments4RunPartitionTreeBootstraps)
+        file("partitions.nex") from joinedAlignments4RunPartitionTreeBootstraps
             .combine(model)
 
     script:
@@ -501,12 +500,16 @@ process runPartitionTreeBootstraps {
       -nt "${task.cpus}" \
       -s alignment.fasta \
       -spp partitions.nex \
-      -bo 20 \
-      -bb 1000 \
+      -bb 10000 \
       -alrt 1000 \
       -bspec GENESITE \
+      -bnni \
       -wbt \
+      -wsr \
+      -wspr \
+      -wslr \
+      -alninfo \
       -st DNA \
-      -pre "chunk${chunk}"
+      -pre "iqtree_busco_partition"
     """
 }
