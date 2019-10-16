@@ -46,19 +46,13 @@ params.buscos = false
 // The fasta ids will be used as species.
 params.ogs = false
 
-// OG codon alignments to use.
+// Tidied OG codon alignments to use.
 // Should be a directory of ".fasta" files.
 // File basenames will be used as OG names.
 // The fasta ids will be used as species.
 params.alignments = false
 
-// Tidied OG codon alignment to use.
-// Should be a single fasta file containing the concatenated codon alignments.
-// No additional filtering will be done on this file.
-// This should be accompanied by a partitioned file or a model file.
-params.joined = false
-
-// A nexus or RaxML formatted partition file to use alongside the tidied fasta.
+// A nexus or RaxML formatted partition file to use alongside the tidied fastas.
 params.partitions = false
 
 // A nexus file containing the partitions and models to use for iqtree.
@@ -85,13 +79,12 @@ params.min_entropy = 1
 // Should be a number corresponding to one of the NCBI translation tables.
 params.gencode = 1
 
+params.seed = 123
 
-def run_busco = !( params.buscos || params.ogs || params.alignments || params.joined )
-def run_ogs = !( params.ogs || params.alignments || params.joined )
-def run_align = !( params.alignments ||  params.joined )
-def run_join = ! params.joined
-def run_model_finder = ! params.model
-
+def run_busco = !( params.buscos || params.ogs || params.alignments )
+def run_ogs = !( params.ogs || params.alignments )
+def run_align = !( params.alignments )
+def run_partitions = !( params.partitions )
 
 if ( params.genomes ) {
     Channel.fromPath(params.genomes, checkIfExists: true, type: "file")
@@ -137,27 +130,14 @@ if ( params.ogs ) {
 
 if ( params.alignments ) {
     Channel
-        .fromPath(params.alignments, checkIfExists: true, type: "dir")
-        .first()
+        .fromPath(params.alignments, checkIfExists: true, type: "file")
         .set { userAlignments }
-}
-
-
-if ( params.joined ) {
-    Channel
-        .fromPath(params.joined, checkIfExists: true, type: "file")
-        .first()
-        .set { userJoined }
-} else if ( !run_align && !(params.partitions || params.model) ) {
-    log.error "You provided a tidied/joined fasta but not a partition or model file."
-    exit 1
 }
 
 
 if ( params.partitions ) {
     Channel
         .fromPath(params.partitions, checkIfExists: true, type: "file")
-        .first()
         .set { userPartitions }
 } else {
     userPartitions = Channel.empty()
@@ -326,7 +306,7 @@ process alignOGs {
     file "families" from selectedOGs
 
     output:
-    file "og_alignments" into computedOGAlignments
+    file "og_alignments" into ogAlignments
 
     script:
     """
@@ -351,12 +331,6 @@ process alignOGs {
 }
 
 
-if ( params.alignments ) {
-    ogAlignments = userAlignments
-} else {
-    ogAlignments = computedOGAlignments
-}
-
 
 process tidyCodonAlignments {
 
@@ -369,7 +343,7 @@ process tidyCodonAlignments {
     file "alignments" from ogAlignments
 
     output:
-    file "tidied_alignments" into tidiedAlignments
+    file "tidied_alignments/*" into computedTidiedAlignments mode flatten
 
     script:
     """
@@ -392,6 +366,165 @@ process tidyCodonAlignments {
 }
 
 
+if ( params.alignments ) {
+    tidiedAlignments = userAlignments
+} else {
+    tidiedAlignments = computedTidiedAlignments
+}
+
+tidiedAlignments.into {
+    tidiedAlignments4GetPartitions;
+    tidiedAlignments4MergeWithPartitions;
+    tidiedAlignments4MergeWithPartitionedModels;
+}
+
+
+process getPartitions {
+
+    label "python3"
+    label "big_task"
+
+    publishDir "${params.outdir}"
+    
+    when:
+    run_partitions
+
+    input:
+    file "alignments/*" from tidiedAlignments4GetPartitions.collect()
+
+    output:
+    file "partitions/*" into computedPartitions mode flatten
+
+    script:
+    """
+    mkdir partitions
+
+    find \
+      alignments/ \
+      \\( -name "*.fasta" -or -name "*.fa" -or -name "*.fna" -or -name "*.fas" \\) \
+      -printf '%f\\0' \
+    | xargs \
+        -0 \
+        -P "${task.cpus}" \
+        -I {} \
+        -- \
+        get_codon_partitions.py -o "partitions/{}" "alignments/{}"
+
+    for f in partitions/*;
+    do
+      mv "\${f}" "\${f%.*}.partitions"
+    done
+    """
+}
+
+
+if ( params.partitions ) {
+    partitions = userPartitions
+} else {
+    partitions = computedPartitions
+}
+
+
+tidiedAlignments4MergeWithPartitions
+    .map { [ it.baseName, it ] }
+    .join( partitions.map { [ it.baseName, it ] }, by: 0 )
+    .set { alignmentsWithPartitions }
+
+
+/*
+ * ModelTest-NG
+ * DOI:
+ *
+ * NOTE: the program fails with error code 114 if it can't parse the MSA for some reason.
+ * NOTE: the program fails with error code 136 with a floating point exception.
+ *       It seems that this is related to MSAs without divergent sites?
+ */
+process findPartitionedModel {
+
+    label "modeltest"
+    label "small_task"
+    validExitStatus 0,114,136
+    publishDir "${params.outdir}/partitioned_models"
+    tag "${name}"
+
+    input:
+    set val(name),
+        file("msa.fasta"),
+        file("msa.partitions") from alignmentsWithPartitions
+
+    output:
+    set val(name),
+        file("${name}.part.aic") optional true into partitionedModels
+
+    file "${name}.part.bic" optional true
+    file "${name}.part.aicc" optional true
+
+    script:
+    """
+    modeltest-ng \
+      --datatype nt \
+      --input "msa.fasta" \
+      --partitions "msa.partitions" \
+      --output "${name}" \
+      -f ef \
+      --model-het uigf \
+      --template raxml
+    """
+}
+
+/*
+tidiedAlignments4MergeWithPartitionedModels
+    .map { [ it.baseName, it ] }
+    .join( partitionedModels, by: 0 )
+    .set { alignmentsWithPartitionedModels }
+
+
+process computeGeneTrees {
+
+	label "raxml"
+	label "medium_task"
+
+        publishDir "${params.outdir}/gene_trees"
+
+	tag "${name}"
+
+	input:
+        set val(name),
+            file("msa.fasta"),
+            file("msa.partitions") from alignmentsWithPartitionedModels
+
+        output:
+        file "${name}.raxml.*"
+
+        //file("T15.raxml.bestModel")
+        //T15.raxml.bestTree
+        //T15.raxml.bootstraps
+        //T15.raxml.log
+        //T15.raxml.mlTrees
+        //T15.raxml.rba
+        //T15.raxml.startTree
+        //T15.raxml.supportFBP
+        //T15.raxml.supportTBE
+
+	script:
+        """
+        sed '/^>/s/[[:space:]].*\$//' "msa.fasta" > tidied.fasta
+        raxml-ng --parse --msa "tidied.fasta" --model msa.partitions --prefix T1
+        raxml-ng \
+          --all \
+          --msa T1.raxml.rba \
+          --model msa.partitions \
+          --prefix "${name}" \
+          --threads "${task.cpus}" \
+          --seed "${params.seed}" \
+          --bs-cutoff 0.3 \
+          --bs-metric fbp,tbe
+        """
+}
+*/
+
+
+/*
 process joinAlignments {
 
     label "python3"
@@ -418,9 +551,11 @@ process joinAlignments {
       --type DNA \
       alignments/*
     """
- }
+}
+*/
 
 
+/*
 if ( params.joined && run_model_finder ) {
     joinedAlignments = userJoined.combine(userPartitions)
 } else {
@@ -476,10 +611,10 @@ if ( params.model ) {
 } else {
     model = computedModel
 }
+*/
 
 
 /*
- */
 process runPartitionTreeBootstraps {
 
     label "iqtree"
@@ -513,3 +648,4 @@ process runPartitionTreeBootstraps {
       -pre "iqtree_busco_partition"
     """
 }
+ */

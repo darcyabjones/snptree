@@ -38,6 +38,9 @@ RAXML_COMMIT=66ad9d2
 RAXML_REPO=https://github.com/amkozlov/raxml-ng.git
 RAXML_PREFIX_ARG=$(INSTALL_BASE)/raxml/$(RAXML_COMMIT)
 
+MODELTEST_VERSION=180a138
+MODELTEST_REPO=https://github.com/ddarriba/modeltest.git
+MODELTEST_PREFIX_ARG=$(INSTALL_BASE)/modeltest/$(MODELTEST_VERSION)
 
 BUSCO_COMMIT=1554283ab8ee7dd5b5290f4f748234f456c36e66
 BUSCO_REPO=https://gitlab.com/ezlab/busco.git
@@ -225,6 +228,18 @@ docker/raxml: raxml.Dockerfile docker/base
 	  --build-arg RAXML_COMMIT="$(RAXML_COMMIT)" \
 	  --build-arg RAXML_REPO="$(RAXML_REPO)" \
 	  --build-arg RAXML_PREFIX_ARG="$(RAXML_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+
+
+docker/modeltest: modeltest.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg MODELTEST_COMMIT="$(MODELTEST_COMMIT)" \
+	  --build-arg MODELTEST_REPO="$(MODELTEST_REPO)" \
+	  --build-arg MODELTEST_PREFIX_ARG="$(MODELTEST_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
