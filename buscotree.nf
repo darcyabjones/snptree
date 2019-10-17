@@ -75,6 +75,9 @@ params.augustus_config = false
 params.max_missing = 0.2
 params.min_entropy = 1
 
+// Compute the gene trees using raxml-ng instead of IQtree with rapid bootstrapping.
+params.raxml = false
+
 // The genetic code to use to translate codons.
 // Should be a number corresponding to one of the NCBI translation tables.
 params.gencode = 1
@@ -385,7 +388,7 @@ process getPartitions {
     label "big_task"
 
     publishDir "${params.outdir}"
-    
+
     when:
     run_partitions
 
@@ -431,64 +434,67 @@ tidiedAlignments4MergeWithPartitions
     .set { alignmentsWithPartitions }
 
 
-/*
- * ModelTest-NG
- * DOI:
- *
- * NOTE: the program fails with error code 114 if it can't parse the MSA for some reason.
- * NOTE: the program fails with error code 136 with a floating point exception.
- *       It seems that this is related to MSAs without divergent sites?
- */
-process findPartitionedModel {
+if (params.raxml) {
 
-    label "modeltest"
-    label "small_task"
-    validExitStatus 0,114,136
-    publishDir "${params.outdir}/partitioned_models"
-    tag "${name}"
+    /*
+     * ModelTest-NG
+     * DOI:
+     *
+     * NOTE: the program fails with error code 114 if it can't parse the MSA for some reason.
+     * NOTE: the program fails with error code 136 with a floating point exception.
+     *       It seems that this is related to MSAs without divergent sites?
+     */
+    process findPartitionedModel {
 
-    input:
-    set val(name),
-        file("msa.fasta"),
-        file("msa.partitions") from alignmentsWithPartitions
+        label "modeltest"
+        label "small_task"
+        validExitStatus 0,114,136
+        publishDir "${params.outdir}/partitioned_models"
+        tag "${name}"
 
-    output:
-    set val(name),
-        file("${name}.part.aic") optional true into partitionedModels
+        input:
+        set val(name),
+            file("msa.fasta"),
+            file("msa.partitions") from alignmentsWithPartitions
 
-    file "${name}.part.bic" optional true
-    file "${name}.part.aicc" optional true
+        output:
+        set val(name),
+            file("${name}.part.aic") optional true into partitionedModels
 
-    script:
-    """
-    modeltest-ng \
-      --datatype nt \
-      --input "msa.fasta" \
-      --partitions "msa.partitions" \
-      --output "${name}" \
-      -f ef \
-      --model-het uigf \
-      --template raxml
-    """
-}
+        file "${name}.part.bic" optional true
+        file "${name}.part.aicc" optional true
 
-/*
-tidiedAlignments4MergeWithPartitionedModels
-    .map { [ it.baseName, it ] }
-    .join( partitionedModels, by: 0 )
-    .set { alignmentsWithPartitionedModels }
+        script:
+        """
+        modeltest-ng \
+          --datatype nt \
+          --input "msa.fasta" \
+          --partitions "msa.partitions" \
+          --output "${name}" \
+          -f ef \
+          --model-het uigf \
+          --template raxml
+        """
+    }
+
+    /*
+     */
+    tidiedAlignments4MergeWithPartitionedModels
+        .map { [ it.baseName, it ] }
+        .join( partitionedModels, by: 0 )
+        .set { alignmentsWithPartitionedModels }
 
 
-process computeGeneTrees {
+    process computeRAxMLGeneTrees {
 
-	label "raxml"
-	label "medium_task"
+        label "raxml"
+        label "medium_task"
 
         publishDir "${params.outdir}/gene_trees"
 
-	tag "${name}"
+        tag "${name}"
 
-	input:
+        input:
         set val(name),
             file("msa.fasta"),
             file("msa.partitions") from alignmentsWithPartitionedModels
@@ -506,7 +512,7 @@ process computeGeneTrees {
         //T15.raxml.supportFBP
         //T15.raxml.supportTBE
 
-	script:
+        script:
         """
         sed '/^>/s/[[:space:]].*\$//' "msa.fasta" > tidied.fasta
         raxml-ng --parse --msa "tidied.fasta" --model msa.partitions --prefix T1
@@ -520,8 +526,44 @@ process computeGeneTrees {
           --bs-cutoff 0.3 \
           --bs-metric fbp,tbe
         """
+    }
+
+else {
+
+    process computeIQTreeGeneTrees {
+        label "iqtree"
+        label "medium_task"
+
+        publishDir "${params.outdir}/gene_trees"
+
+        tag "${name}"
+
+        input:
+        set val(name),
+            file("msa.fasta"),
+            file("msa.partitions") from alignmentsWithPartitions
+
+        script:
+        """
+        iqtree \
+          -nt AUTO \
+          -ntmax "${task.cpus}" \
+          -s msa.fasta \
+          -spp msa.partitions \
+          -m MFP \
+          -cmax 6 \
+          -st DNA \
+          -bb 5000 \
+          -bnni \
+          -wbt \
+          -wsr \
+          -wspr \
+          -wslr \
+          -alninfo \
+          -pre "${name}_iqtree"
+        """
+    }
 }
-*/
 
 
 /*
