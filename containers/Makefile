@@ -58,8 +58,17 @@ OCCULTERCUT_VERSION=1.1
 OCCULTERCUT_URL=https://downloads.sourceforge.net/project/occultercut/OcculterCut_v1.1.tar.gz
 OCCULTERCUT_PREFIX_ARG=$(INSTALL_BASE)/occultercut/$(OCCULTERCUT_VERSION)
 
-GENERAL=bedtools python3 posix htslib snpeff busco decipher occultercut
-PHYLOGENETICS=iqtree raxml
+ASTRAL_VERSION=5.6.3
+ASTRAL_URL=https://github.com/smirarab/ASTRAL/raw/master/Astral.5.6.3.zip
+ASTRAL_PREFIX_ARG=$(INSTALL_BASE)/astral/$(ASTRAL_VERSION)
+ASTRAL_JAR_ARG=$(ASTRAL_PREFIX_ARG)/astral.5.6.3.jar
+
+NWUTILS_VERSION=1.5.0
+NWUTILS_URL=http://cegg.unige.ch/pub/newick-utils-1.5.0.tar.gz
+NWUTILS_PREFIX_ARG=$(INSTALL_BASE)/nwutils/$(NWUTILS_VERSION)
+
+GENERAL=bedtools python3 posix htslib snpeff busco decipher occultercut nwutils
+PHYLOGENETICS=iqtree raxml astral
 
 OPEN=$(GENERAL) $(PHYLOGENETICS)
 
@@ -131,6 +140,20 @@ docker/base: base.Dockerfile
 	@touch $@
 
 
+docker/astral: astral.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg ASTRAL_VERSION="$(ASTRAL_VERSION)" \
+	  --build-arg ASTRAL_URL="$(ASTRAL_URL)" \
+	  --build-arg ASTRAL_PREFIX_ARG="$(ASTRAL_PREFIX_ARG)" \
+	  --build-arg ASTRAL_JAR_ARG="$(ASTRAL_JAR_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
 docker/htslib: htslib.Dockerfile docker/base
 	docker build \
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
@@ -176,6 +199,19 @@ docker/bedtools: bedtools.Dockerfile docker/base
 	  --build-arg BEDTOOLS_VERSION="$(BEDTOOLS_VERSION)" \
 	  --build-arg BEDTOOLS_URL="$(BEDTOOLS_URL)" \
 	  --build-arg BEDTOOLS_PREFIX_ARG="$(BEDTOOLS_PREFIX_ARG)" \
+	  --file $< \
+	  -t "$(call make_image_name,$@)" \
+	  .
+	@mkdir -p "$(dir $@)"
+	@touch $@
+
+
+docker/nwutils: nwutils.Dockerfile docker/base
+	docker build \
+	  --build-arg IMAGE="$(BASE_IMAGE)" \
+	  --build-arg NWUTILS_VERSION="$(NWUTILS_VERSION)" \
+	  --build-arg NWUTILS_URL="$(NWUTILS_URL)" \
+	  --build-arg NWUTILS_PREFIX_ARG="$(NWUTILS_PREFIX_ARG)" \
 	  --file $< \
 	  -t "$(call make_image_name,$@)" \
 	  .
