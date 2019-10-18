@@ -78,6 +78,10 @@ params.min_entropy = 1
 // Compute the gene trees using raxml-ng instead of IQtree with rapid bootstrapping.
 params.raxml = false
 
+// Collapse gene tree clades with < this support value into polytomies before running astral.
+// Uses 50% for IQtree UFboot values and 10% for RAxML non-parametric bootstraps.
+params.gene_bs_collapse = params.raxml ? 10 : 50
+
 // The genetic code to use to translate codons.
 // Should be a number corresponding to one of the NCBI translation tables.
 params.gencode = 1
@@ -528,11 +532,11 @@ if (params.raxml) {
         """
     }
 
-else {
+} else {
 
     process computeIQTreeGeneTrees {
         label "iqtree"
-        label "medium_task"
+        label "small_task"
 
         publishDir "${params.outdir}/gene_trees"
 
@@ -543,17 +547,33 @@ else {
             file("msa.fasta"),
             file("msa.partitions") from alignmentsWithPartitions
 
+        output:
+        set val(name),
+            file("${name}_iqtree.treefile") into geneTrees
+
+	file "${name}_iqtree.alninfo"
+	file "${name}_iqtree.best_scheme"
+	file "${name}_iqtree.best_scheme.nex"
+	file "${name}_iqtree.contree"
+	file "${name}_iqtree.iqtree"
+	file "${name}_iqtree.mldist"
+	file "${name}_iqtree.model.gz"
+	file "${name}_iqtree.rate"
+	file "${name}_iqtree.sitelh"
+	file "${name}_iqtree.siteprob"
+	file "${name}_iqtree.ufboot"
+
         script:
         """
         iqtree \
-          -nt AUTO \
-          -ntmax "${task.cpus}" \
+          -nt 1 \
           -s msa.fasta \
           -spp msa.partitions \
           -m MFP \
           -cmax 6 \
           -st DNA \
-          -bb 5000 \
+          -bb 1000 \
+          -nstop 50 \
           -bnni \
           -wbt \
           -wsr \
@@ -565,6 +585,49 @@ else {
     }
 }
 
+
+process collapseGeneTrees {
+
+    label "nwutils"
+    label "small_task"
+
+    tag "${name}"
+
+    input:
+    file "gene_trees/*.nwk" from geneTrees
+        .map { n, f -> f }
+        .collect()
+
+
+    output:
+    file "collapsed.nwk" into collapsedGeneTrees
+
+    script:
+    """
+    cat gene_trees/*.nwk > combined.nwk
+    nw_ed combined.nwk 'i & b <= ${params.gene_bs_collapse}' o > collapsed.nwk
+    """
+}
+
+
+process runAstral {
+
+    label "astral"
+    label "small_task"
+
+    tag "${name}"
+
+    input:
+    file "gene_trees.nwk" from collapsedGeneTrees
+
+    script:
+    """
+    java -jar "${ASTRAL_JAR}" \
+      -i gene_trees.nwk \
+      -o species.nwk \
+    2> species_log.txt
+    """
+}
 
 /*
 process joinAlignments {

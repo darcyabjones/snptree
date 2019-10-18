@@ -519,6 +519,7 @@ process runPartitionTreeUFBootstraps {
       -s snps.fasta \
       -spp partitions.nex \
       -bb 10000 \
+      -nstop 50 \
       -bnni \
       -alrt 1000 \
       -bspec GENESITE \
