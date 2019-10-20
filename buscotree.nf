@@ -591,8 +591,6 @@ process collapseGeneTrees {
     label "nwutils"
     label "small_task"
 
-    tag "${name}"
-
     input:
     file "gene_trees/*.nwk" from geneTrees
         .map { n, f -> f }
@@ -615,14 +613,12 @@ process runAstral {
     label "astral"
     label "small_task"
 
-    tag "${name}"
-
     input:
     file "gene_trees.nwk" from collapsedGeneTrees
 
     script:
     """
-    java -jar "${ASTRAL_JAR}" \
+    java -jar "\${ASTRAL_JAR}" \
       -i gene_trees.nwk \
       -o species.nwk \
     2> species_log.txt

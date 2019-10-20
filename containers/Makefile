@@ -58,10 +58,11 @@ OCCULTERCUT_VERSION=1.1
 OCCULTERCUT_URL=https://downloads.sourceforge.net/project/occultercut/OcculterCut_v1.1.tar.gz
 OCCULTERCUT_PREFIX_ARG=$(INSTALL_BASE)/occultercut/$(OCCULTERCUT_VERSION)
 
-ASTRAL_VERSION=5.6.3
-ASTRAL_URL=https://github.com/smirarab/ASTRAL/raw/master/Astral.5.6.3.zip
-ASTRAL_PREFIX_ARG=$(INSTALL_BASE)/astral/$(ASTRAL_VERSION)
-ASTRAL_JAR_ARG=$(ASTRAL_PREFIX_ARG)/astral.5.6.3.jar
+ASTRAL_COMMIT=5f4ec82
+ASTRAL_REPO=https://github.com/smirarab/ASTRAL.git
+ASTRAL_PREFIX_ARG=$(INSTALL_BASE)/astral/$(ASTRAL_COMMIT)
+ASTRAL_JAR_ARG=$(ASTRAL_PREFIX_ARG)/astral.5.14.2.jar
+
 
 NWUTILS_VERSION=1.5.0
 NWUTILS_URL=http://cegg.unige.ch/pub/newick-utils-1.5.0.tar.gz
@@ -143,8 +144,8 @@ docker/base: base.Dockerfile
 docker/astral: astral.Dockerfile docker/base
 	docker build \
 	  --build-arg IMAGE="$(BASE_IMAGE)" \
-	  --build-arg ASTRAL_VERSION="$(ASTRAL_VERSION)" \
-	  --build-arg ASTRAL_URL="$(ASTRAL_URL)" \
+	  --build-arg ASTRAL_COMMIT="$(ASTRAL_COMMIT)" \
+	  --build-arg ASTRAL_REPO="$(ASTRAL_REPO)" \
 	  --build-arg ASTRAL_PREFIX_ARG="$(ASTRAL_PREFIX_ARG)" \
 	  --build-arg ASTRAL_JAR_ARG="$(ASTRAL_JAR_ARG)" \
 	  --file $< \
