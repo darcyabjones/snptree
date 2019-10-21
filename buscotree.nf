@@ -91,8 +91,8 @@ params.gene_bs_collapse = params.raxml ? 10 : 50
 // Should be a number corresponding to one of the NCBI translation tables.
 params.gencode = 1
 
-params.max_iterations = 100
-params.max_dist = 100
+params.max_iterations = 200
+params.max_dist = 10
 
 params.seed = 123
 
@@ -704,6 +704,29 @@ speciesTree.into {
 }
 
 
+process getConcordanceFactors {
+
+    label "iqtree"
+    label "big_task"
+
+    input:
+    file "species.nwk" from speciesTree4GetConcordanceFactors
+    file "loci/*" from geneTrees4GetConcordanceFactors.map {n, f -> f} .collect()
+    file "alignments/*" from tidiedAlignments4GetConcordanceFactors.collect()
+
+    script:
+    """
+    cat loci/* > loci.nwk
+    iqtree \
+      -nt "${task.cpus}" \
+      -t species.nwk \
+      --gcf loci.nwk \
+      -p alignments \
+      --scf 100 \
+      --prefix concord
+    """
+}
+
 
 /*
  */
@@ -734,6 +757,18 @@ process computeGeneTreeRFDists {
 }
 
 
+/*
+ * This next section is a bit weird.
+ * What we're doing is progressively combining the best trees
+ * (by rfdist) and creating a new "species" tree from them.
+ * if the new species tree is within x distance of the complete species tree,
+ * then we have a valid subset and we can stop adding more trees,
+ * otherwise we add the next best tree.
+ *
+ * The approach is based on https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3985644/
+ *
+ * First sort by rfdistance (ascending)
+ */
 geneTreeRFDists
     .map { n, f -> f }
     .collectFile(name: "${params.outdir}/gene_trees.tsv")
@@ -745,8 +780,16 @@ geneTreeRFDists
     .set { combinedGeneTreeRFDists }
 
 
+/*
+ * Here select the best rftree as an initial tree.
+ * The "choice" hack is because .head() returns a value channel and i also need
+ * the remainder after that, which doesn't have an operator
+ * and i don't seem to be able to use the channel again after head.
+ */
 def is_first = true
 
+// We get a depreciation warning for this, but it is unclear what
+// the appropriate replacement is. .empty() doesn't work.
 def head = Channel.create()
 def tail = Channel.create()
 
@@ -760,6 +803,12 @@ combinedGeneTreeRFDists
         }
     }
 
+
+/*
+ * Now we construct the initial accumulator.
+ * Essentially this is a fold operation, and we want to keep track
+ * of the gene ids that make up the trees and the gene trees themselves.
+ */
 process initFold {
 
     label "posix"
@@ -777,11 +826,19 @@ process initFold {
     """
 }
 
+
+/*
+ * This is necessary to complete the loop.
+ * We're combining the initial accumulator with the
+ * accumulator generated after each iteration.
+ */
 recurseAccumulator = Channel.create()
 accumulator = initAccumulator.mix(recurseAccumulator)
 
 /*
-*/
+ * This takes our accumulator and the next best gene from the
+ * gene tree channel, and adds the new gene to the accumulator.
+ */
 process combineFold {
 
     label "posix"
@@ -809,6 +866,10 @@ process combineFold {
 }
 
 
+/*
+ * With our set of gene trees in accumulator
+ * construct a composite tree.
+ */
 process selectBestGeneTrees {
 
     label "astral"
@@ -827,10 +888,16 @@ process selectBestGeneTrees {
       -o species.nwk \
     2> species_log.txt
     """
-
 }
 
 
+/*
+ * Evaluate the composite tree from this subset of gene trees against
+ * the species tree constructed from the full set.
+ * If the distance is small enough, or we've reached the maximum number
+ * of iterations, we stop the recursion by not feeding new files back into
+ * the accumulator channel.
+ */
 process findGeneTreeDist {
 
     label "iqtree"
@@ -863,29 +930,6 @@ process findGeneTreeDist {
     """
 }
 
-
-process getConcordanceFactors {
-
-    label "iqtree"
-    label "big_task"
-
-    input:
-    file "species.nwk" from speciesTree4GetConcordanceFactors
-    file "loci/*" from geneTrees4GetConcordanceFactors.map {n, f -> f} .collect()
-    file "alignments/*" from tidiedAlignments4GetConcordanceFactors.collect()
-
-    script:
-    """
-    cat loci/* > loci.nwk
-    iqtree \
-      -nt "${task.cpus}" \
-      -t species.nwk \
-      --gcf loci.nwk \
-      -p alignments \
-      --scf 100 \
-      --prefix concord
-    """
-}
 
 
 /*
