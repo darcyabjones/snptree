@@ -24,6 +24,7 @@ RUN  set -eu \
   && unzip "astral.zip" \
   && mkdir -p "${ASTRAL_PREFIX}" \
   && mv Astral/* "${ASTRAL_PREFIX}" \
+  && chmod a+rx "${ASTRAL_JAR}" \
   && rm -rf -- "${ASTRAL_PREFIX}/test_data" "${ASTRAL_PREFIX}"/*.pdf \
   && add_runtime_dep default-jre-headless
 

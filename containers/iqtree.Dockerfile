@@ -16,6 +16,7 @@ RUN  set -eu \
        build-essential \
        ca-certificates \
        cmake \
+       libboost-dev \
        libeigen3-dev \
        libmpich-dev \
        wget \

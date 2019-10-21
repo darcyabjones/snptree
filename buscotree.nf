@@ -59,6 +59,11 @@ params.partitions = false
 // Should be used alongside tidied.
 params.model = false
 
+params.gene_trees = false
+
+//
+params.species_tree = false
+
 
 // A folder containing the BUSCO lineage files.
 params.busco_lineage = false
@@ -86,12 +91,17 @@ params.gene_bs_collapse = params.raxml ? 10 : 50
 // Should be a number corresponding to one of the NCBI translation tables.
 params.gencode = 1
 
+params.max_iterations = 100
+params.max_dist = 100
+
 params.seed = 123
 
 def run_busco = !( params.buscos || params.ogs || params.alignments )
 def run_ogs = !( params.ogs || params.alignments )
 def run_align = !( params.alignments )
 def run_partitions = !( params.partitions )
+def run_gene_trees = !( params.gene_trees )
+def run_species_tree = !( params.species_tree )
 
 if ( params.genomes ) {
     Channel.fromPath(params.genomes, checkIfExists: true, type: "file")
@@ -158,6 +168,26 @@ if ( params.model ) {
         .set { userModel }
 } else {
     userModel = Channel.empty()
+}
+
+
+if ( params.gene_trees ) {
+    Channel
+        .fromPath(params.gene_trees, checkIfExists: true, type: 'file')
+        .map { f -> [f.baseName, f] }
+        .set { userGeneTrees }
+} else {
+    userGeneTrees = Channel.empty()
+}
+
+
+if ( params.species_tree ) {
+    Channel
+        .fromPath(params.species_tree, checkIfExists: true, type: "file")
+        .first()
+        .set { userSpeciesTree }
+} else {
+    userSpeciesTree = Channel.empty()
 }
 
 
@@ -383,6 +413,7 @@ tidiedAlignments.into {
     tidiedAlignments4GetPartitions;
     tidiedAlignments4MergeWithPartitions;
     tidiedAlignments4MergeWithPartitionedModels;
+    tidiedAlignments4GetConcordanceFactors;
 }
 
 
@@ -456,6 +487,9 @@ if (params.raxml) {
         publishDir "${params.outdir}/partitioned_models"
         tag "${name}"
 
+        when:
+        run_gene_trees
+
         input:
         set val(name),
             file("msa.fasta"),
@@ -498,12 +532,17 @@ if (params.raxml) {
 
         tag "${name}"
 
+        when:
+        run_gene_trees
+
         input:
         set val(name),
             file("msa.fasta"),
             file("msa.partitions") from alignmentsWithPartitionedModels
 
         output:
+        set val(name),
+            file("${name}.raxml.bestTree") into computedGeneTrees
         file "${name}.raxml.*"
 
         //file("T15.raxml.bestModel")
@@ -542,6 +581,9 @@ if (params.raxml) {
 
         tag "${name}"
 
+        when:
+        run_gene_trees
+
         input:
         set val(name),
             file("msa.fasta"),
@@ -549,7 +591,7 @@ if (params.raxml) {
 
         output:
         set val(name),
-            file("${name}_iqtree.treefile") into geneTrees
+            file("${name}_iqtree.treefile") into computedGeneTrees
 
 	file "${name}_iqtree.alninfo"
 	file "${name}_iqtree.best_scheme"
@@ -586,13 +628,27 @@ if (params.raxml) {
 }
 
 
+if ( params.gene_trees ) {
+    geneTrees = userGeneTrees
+} else {
+    geneTrees = computedGeneTrees
+}
+
+geneTrees.into {
+    geneTrees4CollapseGeneTrees;
+    geneTrees4ComputeGeneTreeRFDists;
+    geneTrees4GetConcordanceFactors;
+    geneTrees4MergeWithRFDists;
+}
+
+
 process collapseGeneTrees {
 
     label "nwutils"
     label "small_task"
 
     input:
-    file "gene_trees/*.nwk" from geneTrees
+    file "gene_trees/*.nwk" from geneTrees4CollapseGeneTrees
         .map { n, f -> f }
         .collect()
 
@@ -613,8 +669,17 @@ process runAstral {
     label "astral"
     label "small_task"
 
+    publishDir "${params.outdir}/species_trees"
+
+    when:
+    run_species_tree
+
     input:
     file "gene_trees.nwk" from collapsedGeneTrees
+
+    output:
+    file "species.nwk" into computedSpeciesTree
+    file "species_log.nwk"
 
     script:
     """
@@ -624,6 +689,204 @@ process runAstral {
     2> species_log.txt
     """
 }
+
+
+if ( params.species_tree ) {
+    speciesTree = userSpeciesTree
+} else {
+    speciesTree = computedSpeciesTree
+}
+
+speciesTree.into {
+    speciesTree4ComputeGeneTreeRFDists;
+    speciesTree4GetConcordanceFactors;
+    speciesTree4SelectBestGeneTrees;
+}
+
+
+
+/*
+ */
+process computeGeneTreeRFDists {
+
+    label "iqtree"
+    label "small_task"
+
+    tag "${name}"
+
+    input:
+    set val(name),
+        file("gene.nwk"),
+        file("species.nwk") from geneTrees4ComputeGeneTreeRFDists
+            .combine(speciesTree4ComputeGeneTreeRFDists) 
+
+    output:
+    set val(name),
+        file("${name}_rfdist.tsv") into geneTreeRFDists
+
+    script:
+    """
+    iqtree -t species.nwk -rf gene.nwk
+    tail -n+2 species.nwk.rfdist \
+    | awk -v name="${name}" 'BEGIN {OFS="\\t"} {print name, \$2}' \
+    > "${name}_rfdist.tsv"
+    """
+}
+
+
+geneTreeRFDists
+    .map { n, f -> f }
+    .collectFile(name: "${params.outdir}/gene_trees.tsv")
+    .splitCsv(sep: '\t')
+    .toSortedList( { a, b -> a[1] <=> b[1] } )
+    .flatMap()
+    .combine(geneTrees4MergeWithRFDists, by: 0) 
+    .map { n, d, f -> [n, f] }
+    .set { combinedGeneTreeRFDists }
+
+
+def is_first = true
+
+def head = Channel.create()
+def tail = Channel.create()
+
+combinedGeneTreeRFDists
+    .choice(head, tail) { a ->
+        if (is_first) {
+            is_first = false
+            0
+        } else {
+            1
+        }
+    }
+
+process initFold {
+
+    label "posix"
+    label "small_task"
+
+    input:
+    set val(name), file("gene.nwk") from head 
+
+    output:
+    set file("names.tsv"), file("gene.nwk") into initAccumulator
+
+    script:
+    """
+    echo "${name}" > names.tsv
+    """
+}
+
+recurseAccumulator = Channel.create()
+accumulator = initAccumulator.mix(recurseAccumulator)
+
+/*
+*/
+process combineFold {
+
+    label "posix"
+    label "small_task"
+
+    input:
+    set val(name),
+        file("gene.nwk"),
+        file("names.tsv"),
+        file("accum.nwk") from tail
+            .merge(accumulator)
+
+    output:
+    set file("new_names.tsv"),
+        file("new_accum.nwk") into combinedFold
+
+    script:
+    """
+    cp -L names.tsv new_names.tsv
+    cp -L accum.nwk new_accum.nwk
+
+    echo "${name}" >> new_names.tsv
+    cat gene.nwk >> new_accum.nwk
+    """
+}
+
+
+process selectBestGeneTrees {
+
+    label "astral"
+    label "small_task"
+
+    input:
+    set file("names.tsv"), file("gene.nwk") from combinedFold
+
+    output:
+    set file("names.tsv"), file("gene.nwk"), file("species.nwk") into combinedFoldTree
+
+    script:
+    """
+    java -jar "\${ASTRAL_JAR}" \
+      -i gene.nwk \
+      -o species.nwk \
+    2> species_log.txt
+    """
+
+}
+
+
+process findGeneTreeDist {
+
+    label "iqtree"
+    label "small_task"
+
+    input:
+    set file("names.tsv"),
+        file("gene.nwk"),
+        file("gene_species.nwk"),
+        file("species.nwk") from combinedFoldTree
+            .combine(speciesTree4SelectBestGeneTrees)
+
+    output:
+    set file("new_names.tsv"), file("new_gene.nwk") into recurseAccumulator optional true
+    set file("names.tsv"), file("gene.nwk"), file("gene_species.nwk"), file("distance.txt")
+
+    script:
+    """
+    iqtree -t species.nwk -rf gene_species.nwk
+    DIST=\$(tail -n+2 species.nwk.rfdist | awk '{print \$2}')
+    NITERS=\$(wc -l < gene.nwk)
+
+    if [ \${DIST} -gt ${params.max_dist} ] && [ \${NITERS} -le ${params.max_iterations} ]
+    then
+        cp -L gene.nwk new_gene.nwk
+        cp -L names.tsv new_names.tsv
+    fi 
+
+    echo \${DIST} > distance.txt
+    """
+}
+
+
+process getConcordanceFactors {
+
+    label "iqtree"
+    label "big_task"
+
+    input:
+    file "species.nwk" from speciesTree4GetConcordanceFactors
+    file "loci/*" from geneTrees4GetConcordanceFactors.map {n, f -> f} .collect()
+    file "alignments/*" from tidiedAlignments4GetConcordanceFactors.collect()
+
+    script:
+    """
+    cat loci/* > loci.nwk
+    iqtree \
+      -nt "${task.cpus}" \
+      -t species.nwk \
+      --gcf loci.nwk \
+      -p alignments \
+      --scf 100 \
+      --prefix concord
+    """
+}
+
 
 /*
 process joinAlignments {
