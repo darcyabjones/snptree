@@ -91,8 +91,9 @@ params.gene_bs_collapse = params.raxml ? 10 : 50
 // Should be a number corresponding to one of the NCBI translation tables.
 params.gencode = 1
 
-params.max_iterations = 200
-params.max_dist = 10
+params.max_iterations = 100
+params.max_dist = 20
+params.sample_size = 50
 
 params.seed = 123
 
@@ -545,16 +546,6 @@ if (params.raxml) {
             file("${name}.raxml.bestTree") into computedGeneTrees
         file "${name}.raxml.*"
 
-        //file("T15.raxml.bestModel")
-        //T15.raxml.bestTree
-        //T15.raxml.bootstraps
-        //T15.raxml.log
-        //T15.raxml.mlTrees
-        //T15.raxml.rba
-        //T15.raxml.startTree
-        //T15.raxml.supportFBP
-        //T15.raxml.supportTBE
-
         script:
         """
         sed '/^>/s/[[:space:]].*\$//' "msa.fasta" > tidied.fasta
@@ -729,100 +720,68 @@ process getConcordanceFactors {
 
 
 /*
+ * Here we select the tree with the smallest distance to the
+ * species tree to seed our search for a good set of genes.
  */
-process computeGeneTreeRFDists {
+process selectBestGeneTree {
 
     label "iqtree"
-    label "small_task"
-
-    tag "${name}"
+    label "big_task"
 
     input:
-    set val(name),
-        file("gene.nwk"),
+    set val(names),
+        val(genes),
+        file("genes/*"),
         file("species.nwk") from geneTrees4ComputeGeneTreeRFDists
+            .map { n, g -> [n, g.name, g] }
+            .toList()
+            .map { it.transpose() }
             .combine(speciesTree4ComputeGeneTreeRFDists) 
 
     output:
-    set val(name),
-        file("${name}_rfdist.tsv") into geneTreeRFDists
+    set file("names.txt"),
+        file("best_tree.nwk"),
+        file("remaining.tsv") into bestGeneTree
 
     script:
+    table = [names, genes]
+        .transpose()
+        .collect { "${it[0]}\tgenes/${it[1]}" }
+        .join('\n')
+
     """
-    iqtree -t species.nwk -rf gene.nwk
-    tail -n+2 species.nwk.rfdist \
-    | awk -v name="${name}" 'BEGIN {OFS="\\t"} {print name, \$2}' \
-    > "${name}_rfdist.tsv"
-    """
-}
+    echo "${table}" > table.tsv
+    cat table.tsv \
+    | tr '\\n' '\\t' \
+    | xargs -d '\\t' -n 2 -P "${task.cpus}" \
+        -- \
+        bash -eu -c '
+          iqtree -t species.nwk -rf \$1 --prefix \$0;
+        '
 
+    mkdir tmp
+    while read -r line
+    do
+       NAME=\$(echo "\${line}" | cut -f1 -d '\t')
+       TREEFILE=\$(echo "\${line}" | cut -f2 -d '\t')
+       TREE=\$(cat "\${TREEFILE}")
+       DIST=\$(tail -n+2 "\${NAME}.rfdist" | awk '{print \$2}')
+       echo -e "\${NAME}\\t\${TREE}\\t\${DIST}\\t\${TREEFILE}"
+    done < table.tsv \
+    | sort -k3,3n --temporary-directory=./tmp \
+    > table_with_dists.tsv
+    rm -rf -- tmp
 
-/*
- * This next section is a bit weird.
- * What we're doing is progressively combining the best trees
- * (by rfdist) and creating a new "species" tree from them.
- * if the new species tree is within x distance of the complete species tree,
- * then we have a valid subset and we can stop adding more trees,
- * otherwise we add the next best tree.
- *
- * The approach is based on https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3985644/
- *
- * First sort by rfdistance (ascending)
- */
-geneTreeRFDists
-    .map { n, f -> f }
-    .collectFile(name: "${params.outdir}/gene_trees.tsv")
-    .splitCsv(sep: '\t')
-    .toSortedList( { a, b -> a[1] <=> b[1] } )
-    .flatMap()
-    .combine(geneTrees4MergeWithRFDists, by: 0) 
-    .map { n, d, f -> [n, f] }
-    .set { combinedGeneTreeRFDists }
+    awk 'BEGIN {OFS="\\t"} {print \$1, \$2}' table_with_dists.tsv > remaining.tmp
+    tail -n+2 remaining.tmp > remaining.tsv
 
+    awk '{print \$1}' table_with_dists.tsv > names.tmp
+    head -n 1 names.tmp > names.txt
 
-/*
- * Here select the best rftree as an initial tree.
- * The "choice" hack is because .head() returns a value channel and i also need
- * the remainder after that, which doesn't have an operator
- * and i don't seem to be able to use the channel again after head.
- */
-def is_first = true
+    awk '{print \$4}' table_with_dists.tsv > best_tree.tmp
+    cat \$(head -n 1 best_tree.tmp) > best_tree.nwk
 
-// We get a depreciation warning for this, but it is unclear what
-// the appropriate replacement is. .empty() doesn't work.
-def head = Channel.create()
-def tail = Channel.create()
-
-combinedGeneTreeRFDists
-    .choice(head, tail) { a ->
-        if (is_first) {
-            is_first = false
-            0
-        } else {
-            1
-        }
-    }
-
-
-/*
- * Now we construct the initial accumulator.
- * Essentially this is a fold operation, and we want to keep track
- * of the gene ids that make up the trees and the gene trees themselves.
- */
-process initFold {
-
-    label "posix"
-    label "small_task"
-
-    input:
-    set val(name), file("gene.nwk") from head 
-
-    output:
-    set file("names.tsv"), file("gene.nwk") into initAccumulator
-
-    script:
-    """
-    echo "${name}" > names.tsv
+    rm -f *.tmp
     """
 }
 
@@ -833,60 +792,59 @@ process initFold {
  * accumulator generated after each iteration.
  */
 recurseAccumulator = Channel.create()
-accumulator = initAccumulator.mix(recurseAccumulator)
-
-/*
- * This takes our accumulator and the next best gene from the
- * gene tree channel, and adds the new gene to the accumulator.
- */
-process combineFold {
-
-    label "posix"
-    label "small_task"
-
-    input:
-    set val(name),
-        file("gene.nwk"),
-        file("names.tsv"),
-        file("accum.nwk") from tail
-            .merge(accumulator)
-
-    output:
-    set file("new_names.tsv"),
-        file("new_accum.nwk") into combinedFold
-
-    script:
-    """
-    cp -L names.tsv new_names.tsv
-    cp -L accum.nwk new_accum.nwk
-
-    echo "${name}" >> new_names.tsv
-    cat gene.nwk >> new_accum.nwk
-    """
-}
+bestGeneTree
+    .mix(recurseAccumulator)
+    .set { accumulator }
 
 
 /*
- * With our set of gene trees in accumulator
- * construct a composite tree.
+ * With our set of gene trees in accumulator construct
+ * composite trees for a random sample of the remaining trees.
  */
-process selectBestGeneTrees {
+process getPairwiseGeneTrees {
 
     label "astral"
-    label "small_task"
+    label "big_task"
 
     input:
-    set file("names.tsv"), file("gene.nwk") from combinedFold
+    set file("names.txt"),
+        file("best_tree.nwk"),
+        file("remaining.tsv") from accumulator
 
     output:
-    set file("names.tsv"), file("gene.nwk"), file("species.nwk") into combinedFoldTree
+    set file("names.txt"),
+        file("best_tree.nwk"),
+        file("joint.tsv") into pairwiseGeneTrees
 
     script:
     """
-    java -jar "\${ASTRAL_JAR}" \
-      -i gene.nwk \
-      -o species.nwk \
-    2> species_log.txt
+    mkdir trees
+    shuf -n "${params.sample_size}" remaining.tsv \
+    | tr '\\n' '\\t' \
+    | xargs -d '\\t' -n 2 -P "${task.cpus}" \
+        -- \
+        bash -eu -c '
+          cat best_tree.nwk > "trees/\$0.tmp"
+          echo \$1 >> "trees/\$0.tmp"
+          java -jar "\${ASTRAL_JAR}" \
+            -i "trees/\$0.tmp" \
+            -o "trees/\$0.nwk" \
+            2> "trees/\$0.log"
+        '
+
+    while IFS= read -r line
+    do
+      NAME=\$(echo "\${line}" | cut -f1 -d '\t')
+      TREE=\$(echo "\${line}" | cut -f2 -d '\t')
+      if [ -e "trees/\${NAME}.nwk" ]
+      then
+        JOINT_TREE=\$(cat "trees/\${NAME}.nwk")
+      else
+        JOINT_TREE=""
+      fi
+      echo -e "\${NAME}\\t\${TREE}\\t\${JOINT_TREE}"
+    done < remaining.tsv \
+    > joint.tsv
     """
 }
 
@@ -894,43 +852,84 @@ process selectBestGeneTrees {
 /*
  * Evaluate the composite tree from this subset of gene trees against
  * the species tree constructed from the full set.
- * If the distance is small enough, or we've reached the maximum number
- * of iterations, we stop the recursion by not feeding new files back into
- * the accumulator channel.
- */
-process findGeneTreeDist {
+*/
+process findPairwiseGeneTreeDists {
 
     label "iqtree"
     label "small_task"
 
     input:
-    set file("names.tsv"),
-        file("gene.nwk"),
-        file("gene_species.nwk"),
-        file("species.nwk") from combinedFoldTree
+    set file("names.txt"),
+        file("best_tree.nwk"),
+        file("remaining.tsv"),
+        file("species.nwk") from pairwiseGeneTrees
             .combine(speciesTree4SelectBestGeneTrees)
 
     output:
-    set file("new_names.tsv"), file("new_gene.nwk") into recurseAccumulator optional true
-    set file("names.tsv"), file("gene.nwk"), file("gene_species.nwk"), file("distance.txt")
+    set file("new_names.txt"),
+        file("new_best_tree.nwk"),
+        file("new_remaining.tsv"),
+        file("distance.txt") into recurseAccumulatorTmp
 
     script:
     """
-    iqtree -t species.nwk -rf gene_species.nwk
-    DIST=\$(tail -n+2 species.nwk.rfdist | awk '{print \$2}')
-    NITERS=\$(wc -l < gene.nwk)
+    awk 'BEGIN {OFS="\t"} \$3 != "" {print \$1, \$3}' remaining.tsv \
+    | tr '\\n' '\\t' \
+    | xargs -d '\\t' -n 2 -P "${task.cpus}" \
+        -- \
+        bash -eu -c 'iqtree -t species.nwk -rf <(echo \$1) --prefix \$0;'
 
-    if [ \${DIST} -gt ${params.max_dist} ] && [ \${NITERS} -le ${params.max_iterations} ]
-    then
-        cp -L gene.nwk new_gene.nwk
-        cp -L names.tsv new_names.tsv
-    fi 
+    mkdir tmp
+    while IFS= read -r line
+    do
+      NAME=\$(echo "\${line}" | cut -f1 -d '\t')
+      TREE=\$(echo "\${line}" | cut -f2 -d '\t')
+      if [ -e "\${NAME}.rfdist" ]
+      then
+        DIST=\$(tail -n+2 "\${NAME}.rfdist" | awk '{print \$2}')
+      else
+        DIST="999999999999999999999999999999999"
+      fi
+      echo -e "\${NAME}\\t\${TREE}\\t\${DIST}"
+    done < remaining.tsv \
+    | sort -k3,3n --temporary-directory=./tmp \
+    > sorted_remaining.tsv
+    rm -rf -- tmp
 
-    echo \${DIST} > distance.txt
+    awk 'BEGIN {OFS="\\t"} { print \$1, \$2 }' sorted_remaining.tsv > new_remaining.tmp
+    tail -n+2 new_remaining.tmp > new_remaining.tsv
+
+    awk '{print \$1}' sorted_remaining.tsv > new_names1.tmp
+    head -n 1 new_names1.tmp > new_names2.tmp
+    cat names.txt new_names2.tmp > new_names.txt
+
+    # For some reason, this one fails if I use a pipe?
+    awk '{print \$2}' sorted_remaining.tsv > new_best_tree1.tmp
+    head -n 1 new_best_tree1.tmp > new_best_tree2.tmp
+    cat best_tree.nwk new_best_tree2.tmp > new_best_tree.nwk
+
+    awk '{print \$3}' sorted_remaining.tsv > distance.tmp
+    head -n 1 distance.tmp > distance.txt
+
+    rm -rf -- *.tmp
     """
 }
 
+/*
+ * If the distance is small enough, or we've reached the maximum number
+ * of iterations, we stop the recursion by not feeding new files back into
+ * the accumulator channel.
+ */
+recurseAccumulator << recurseAccumulatorTmp
+    .map { ns, tr, re, d -> [ns, tr, re, d.getText().toInteger()] }
+    .tap { outputAccumulator }
+    .until { ns, tr, re, d ->
+        ns.readLines().size() >= (params.max_iterations + 1) || d <= params.max_dist
+    }
+    .map { ns, tr, re, d -> [ns, tr, re] }
 
+
+outputAccumulator.println()
 
 /*
 process joinAlignments {
